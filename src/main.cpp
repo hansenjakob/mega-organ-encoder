@@ -1,5 +1,5 @@
 #include <Arduino.h>
-// if setup is active high, do we need pulldown resistors on each input pin?
+// if setup is active high, we need pulldown resistors on each input pin
 #define ACTIVE_LOW 1
 
 #define ADC_READY (ADCSRA & _BV(ADIF))
@@ -210,16 +210,16 @@ void read_port(int port_idx, uint8_t channel) {
 
   // iterate through bits
   for (int bit_idx = 0; bit_idx < 8; bit_idx++) {
-    if (changed_keys & 0x01) {
+    if (changed_keys & _BV(bit_idx)) {
       // TODO: debounce?
-      if (key_in & 0x01) {
+      if (key_in & _BV(bit_idx)) {
         send_note_on(channel, NOTE_IDS[port_idx][bit_idx]);
       } else {
         send_note_off(channel, NOTE_IDS[port_idx][bit_idx]);
       }
     }
-    key_in >>= 1;
-    changed_keys >>= 1;
+    // key_in >>= 1;
+    // changed_keys >>= 1;
   }
 }
 
@@ -233,7 +233,7 @@ inline void clear_channel_select() {
 
 inline void select_channel(uint8_t channel) {
 #if ACTIVE_LOW
-  PORTE &= (uint8_t)~_BV(channel + 3);
+  PORTE &= ~_BV(channel + 3);
 #else
   PORTE |= _BV(channel + 3);
 #endif
@@ -258,7 +258,7 @@ void loop() {
         read_port(port_idx, channel);
       }
     } else { // pedals
-      for (int port_idx = 0; port_idx < 5; port_idx++) {
+      for (int port_idx = 0; port_idx < 4; port_idx++) {
         read_port(port_idx, channel);
       }
     }
@@ -281,6 +281,7 @@ void loop() {
 
     // deactivate all channels
     clear_channel_select();
+    _delay_us(2);
     // should we delay slightly before starting again?
   }
 }
