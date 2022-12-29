@@ -11,26 +11,27 @@ PORTB
 0-7: 54, 53, 52, 51, 10, 11, 12, 13
 PORTC
 0-7: 37, 36, 35, 34, 33, 32, 31, 30
+PORTK
+0-7: 62-69, A8-A15
+PORTL
+0-7: 49-42
+PORTH
+0-1: 17-16
+3-6: 6-9
 PORTD
 0-3: 21, 20, 19, 18
 7: 38
-PORTE
-0 and 1 are USART0, used for USB
-3-5: 5, 2, 3. Use for input select
 PORTF
 0-7: 54-61, A0-A7
 PORTG
 0-2: 41-39
 5: 4
-PORTH
-0-1: 17-16
-3-6: 6-9
 PORTJ
-0-1: 15-14
-PORTK
-0-7: 62-69, A8-A15
-PORTL
-0-7: 49-42
+0-1: 15-14 (1 unused)
+
+PORTE
+0 and 1 are USART0, used for USB
+3-5: 5, 2, 3. Use for input select
 
 A, B, C, F, K, L are full ports.
 */
@@ -164,6 +165,8 @@ void setup() {
   ADMUX |= current_expr; // it's zero now, but anyway
 
   // division factor of 32 for ADC clock, giving 500 kHz
+  // ADC takes ~14 cycles to produce a read, so we get one every ~30 us.
+  // This should be more than enough, and we could slow the clock down if needed
   ADCSRA |= _BV(ADPS0) | _BV(ADPS2);
   ADCSRA |= _BV(ADEN); // enable ADC
 
@@ -175,20 +178,20 @@ void setup() {
 
 void send_note_on(uint8_t channel, int note_id) {
   uint8_t command = 0x90 | channel;
-  // Serial.print("on ");
-  // Serial.println(note_id);
-  Serial.write(command);
-  Serial.write(note_id);
-  Serial.write(0x40); // velocity, doesn't matter
+  Serial.print("on ");
+  Serial.println(note_id);
+  // Serial.write(command);
+  // Serial.write(note_id);
+  // Serial.write(0x40); // velocity, doesn't matter
 }
 
 void send_note_off(int channel, int note_id) {
   uint8_t command = 0x80 | channel;
-  // Serial.print("off ");
-  // Serial.println(note_id);
-  Serial.write(command);
-  Serial.write(note_id);
-  Serial.write(0x00); // velocity, may as well be silent?
+  Serial.print("off ");
+  Serial.println(note_id);
+  // Serial.write(command);
+  // Serial.write(note_id);
+  // Serial.write(0x00); // velocity, may as well be silent?
 }
 
 void send_expr(uint8_t value, uint8_t type) {
@@ -218,8 +221,6 @@ void read_port(int port_idx, uint8_t channel) {
         send_note_off(channel, NOTE_IDS[port_idx][bit_idx]);
       }
     }
-    // key_in >>= 1;
-    // changed_keys >>= 1;
   }
 }
 
@@ -249,7 +250,7 @@ inline void restart_adc(uint8_t pin) {
 
 void loop() {
   // put your main code here, to run repeatedly:
-  for (uint8_t channel = 0; channel < 3; channel++) {
+  for (uint8_t channel = 0; channel < 1; channel++) {
 
     select_channel(channel);
 
@@ -280,8 +281,8 @@ void loop() {
     }
 
     // deactivate all channels
-    clear_channel_select();
-    _delay_us(2);
+    // clear_channel_select();
+    // _delay_us(2);
     // should we delay slightly before starting again?
   }
 }
