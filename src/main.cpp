@@ -4,6 +4,13 @@
 
 #define ADC_READY (ADCSRA & _BV(ADIF))
 
+#define OUTPUT_CHANNEL 0
+
+#define DEBOUNCE_MAX 3
+
+#define NOTE_ID(x) ((x + 36))
+// #define NOTE_ID(x) (NOTE_ID_ARRAY[x])
+
 /* IO map
 PORTA
 0-7: 22, 23, 24, 25, 26, 27, 28, 29
@@ -82,18 +89,31 @@ const uint8_t PORT_MASKS[10] = {
 // 0 where a bit is not connected
 // can reorder (except for zeros) if keys are connected differently
 // the zero pattern could be constructed at boot time if that's easier
-const uint8_t NOTE_IDS[10][8] = {
-    36, 37, 38, 39, 40, 41, 42, 43, // PORTA
-    44, 45, 46, 47, 48, 49, 50, 51, // PORTB
-    52, 53, 54, 55, 56, 57, 58, 59, // PORTC
-    60, 61, 62, 63, 64, 65, 66, 67, // PORTK
-    68, 69, 70, 71, 72, 73, 74, 75, // PORTL
-    76, 76, 0,  78, 79, 89, 81, 0,  // PORTH 0-7
-    82, 83, 84, 85, 0,  0,  0,  86, // PORTD 0-7
-    0,  0,  0,  87, 88, 89, 90, 91, // PORTF 0-7
-    92, 93, 94, 0,  0,  95, 0,  0,  // PORTG 0-7
-    96, 0,  0,  0,  0,  0,  0,  0   // PORTJ 0-7
-};
+// const uint8_t NOTE_IDS[10][8] = {
+//     36, 37, 38, 39, 40, 41, 42, 43, // PORTA
+//     44, 45, 46, 47, 48, 49, 50, 51, // PORTB
+//     52, 53, 54, 55, 56, 57, 58, 59, // PORTC
+//     60, 61, 62, 63, 64, 65, 66, 67, // PORTK
+//     68, 69, 70, 71, 72, 73, 74, 75, // PORTL
+//     76, 76, 0,  78, 79, 89, 81, 0,  // PORTH 0-7
+//     82, 83, 84, 85, 0,  0,  0,  86, // PORTD 0-7
+//     0,  0,  0,  87, 88, 89, 90, 91, // PORTF 0-7
+//     92, 93, 94, 0,  0,  95, 0,  0,  // PORTG 0-7
+//     96, 0,  0,  0,  0,  0,  0,  0   // PORTJ 0-7
+// };
+
+// const uint8_t NOTE_ID_ARRAY[61] = {
+//     36, 37, 38, 39, 40, 41, 42, 43, // PORTA
+//     44, 45, 46, 47, 48, 49, 50, 51, // PORTB
+//     52, 53, 54, 55, 56, 57, 58, 59, // PORTC
+//     60, 61, 62, 63, 64, 65, 66, 67, // PORTK
+//     68, 69, 70, 71, 72, 73, 74, 75, // PORTL
+//     76, 76, 78, 79, 89, 81,         // PORTH 0-7
+//     82, 83, 84, 85, 86,             // PORTD 0-7
+//     87, 88, 89, 90, 91,             // PORTF 0-7
+//     92, 93, 94, 95,                 // PORTG 0-7
+//     96                              // PORTJ 0-7
+// };
 
 // MIDI continuous controllers: pitch wheel, breath, expression
 // basically arbitrary choices
@@ -102,7 +122,19 @@ const uint8_t EXPR_CONTROLLERS[3] = {1, 2, 11};
 // (packed) last read state for each key, repeated once for each keyboard
 // always stored active high: a 1 means the corresponding key is pressed
 // initialized to all zeros, representing no presses
-uint8_t key_state[3][10] = {}; 
+uint8_t key_reads[3][10] = {};
+
+// there are a limited number of pointer registers, so to avoid using an extra
+// one, we'll interleave these two states, since we look at them at the same
+// time
+struct key_state {
+  uint8_t debounce_count;
+  bool on;
+};
+// uint8_t debounce_counts[61] = {};
+// bool key_states[61] = {};
+
+struct key_state key_states[3][61] = {};
 
 // last read position of each expression pedal
 uint8_t expr_state[3] = {}; // all zeros
@@ -111,7 +143,33 @@ uint8_t expr_state[3] = {}; // all zeros
 // connected to one at a time
 uint8_t current_expr = 0;
 
-// unsigned long last_update[3][10][8] = {};
+/*
+
+There are a few options for debouncing that will also address the possibility of
+transients induced by other keys.
+
+- keep the current key state and a count of the number of sequential reads
+different from the key state; when the count hits a threshold, switch the key
+state
+
+- keep a running sum of +1 for each on and -1 for each off, saturating at 0 and
+some threshold T. when the sum hits T turn on; when it hits 0 turn off.
+
+- save the last T reads for each key and output on/off based on how many of
+these were on or off.
+
+I think I like option 2 the best, as it can have faster response than 1. Option
+3 is probably hard to calibrate and also more resource-hungry.
+
+*/
+
+inline void start_adc(uint8_t pin) {
+  ADMUX &= B11111000; // clear currently selected pin
+  ADMUX |= pin;
+
+  ADCSRA |= _BV(ADIF); // clear interrupt flag
+  ADCSRA |= _BV(ADSC); // start next conversion
+}
 
 void setup() {
   // setup pullups
@@ -120,7 +178,7 @@ void setup() {
   PORTC |= 0xFF;
   PORTD |= 0xFF;
   // PORTF |= B11111000; // no pullups on ADC inputs
-  PORTF |= 0xFF; //pullups on for testing
+  PORTF |= 0xFF; // pullups on for testing
   PORTG |= 0xFF;
   PORTH |= 0xFF;
   PORTJ |= 0xFF;
@@ -142,13 +200,6 @@ void setup() {
   DDRK &= 0x00;
   DDRL &= 0x00;
 
-  // set up default unpressed state for all pins...active low
-  // for (uint8_t channel = 0; channel < 3; channel++) {
-  //   for (int port_idx = 0; port_idx < 10; port_idx++) {
-  //     key_state[channel][port_idx] = 0xFF;
-  //   }
-  // }
-
   // keyboard select outputs
   DDRE |= B00111000;
   // set all keyboard select to high
@@ -162,22 +213,24 @@ void setup() {
   ADMUX |= _BV(REFS0); // reference = VCC
   ADMUX |= _BV(ADLAR); // only need 8 bits of resolution, so most significant 8
                        // bits of output will be in ADCH
-  ADMUX |= current_expr; // it's zero now, but anyway
+  // ADMUX |= current_expr; // it's zero now, but anyway
 
   // division factor of 32 for ADC clock, giving 500 kHz
   // ADC takes ~14 cycles to produce a read, so we get one every ~30 us.
   // This should be more than enough, and we could slow the clock down if needed
   ADCSRA |= _BV(ADPS0) | _BV(ADPS2);
-  ADCSRA |= _BV(ADEN); // enable ADC
+  // enable ADC
+  ADCSRA |= _BV(ADEN);
 
   // disable digital inputs on ADC pins
   DIDR0 |= _BV(ADC2D) | _BV(ADC1D) | _BV(ADC0D);
 
-  ADCSRA |= _BV(ADSC); // start conversion
+  // start conversion
+  start_adc(current_expr);
 }
 
-void send_note_on(uint8_t channel, int note_id) {
-  uint8_t command = 0x90 | channel;
+void send_note_on(int note_id) {
+  uint8_t command = 0x90 | OUTPUT_CHANNEL;
   Serial.print("on ");
   Serial.println(note_id);
   // Serial.write(command);
@@ -185,8 +238,8 @@ void send_note_on(uint8_t channel, int note_id) {
   // Serial.write(0x40); // velocity, doesn't matter
 }
 
-void send_note_off(int channel, int note_id) {
-  uint8_t command = 0x80 | channel;
+void send_note_off(int note_id) {
+  uint8_t command = 0x80 | OUTPUT_CHANNEL;
   Serial.print("off ");
   Serial.println(note_id);
   // Serial.write(command);
@@ -195,74 +248,93 @@ void send_note_off(int channel, int note_id) {
 }
 
 void send_expr(uint8_t value, uint8_t type) {
-  // Serial.print("expr ");
-  // Serial.println(value);
-  Serial.write(0xB1); // continuous control command
-  Serial.write(type);
-  Serial.write(value);
+  Serial.print("expr ");
+  Serial.println(value);
+  // Serial.write(0xB1); // continuous control command
+  // Serial.write(type);
+  // Serial.write(value);
 }
 
-void read_port(int port_idx, uint8_t channel) {
+inline void read_port(int channel, int port_idx) {
   uint8_t key_in = *(PORT_SEQUENCE[port_idx]);
 #if ACTIVE_LOW
   key_in = ~key_in; // convert active low to active 1
 #endif
   key_in &= PORT_MASKS[port_idx];
-  uint8_t changed_keys = (uint8_t)(key_in ^ key_state[channel][port_idx]);
-  key_state[channel][port_idx] = key_in;
+  key_reads[channel][port_idx] = key_in;
+}
 
-  // iterate through bits
-  for (int bit_idx = 0; bit_idx < 8; bit_idx++) {
-    if (changed_keys & _BV(bit_idx)) {
-      // TODO: debounce?
-      if (key_in & _BV(bit_idx)) {
-        send_note_on(channel, NOTE_IDS[port_idx][bit_idx]);
-      } else {
-        send_note_off(channel, NOTE_IDS[port_idx][bit_idx]);
+inline void update_key_state(int channel) {
+  uint8_t key_idx = 0;
+  struct key_state* current_key_ptr = key_states[channel];
+  for (uint8_t port_idx = 0; port_idx < 10; port_idx++) {
+    uint8_t key_read = key_reads[channel][port_idx];
+    uint8_t port_mask = PORT_MASKS[port_idx];
+    uint8_t current_bit_mask = 0x01;
+    for (uint8_t current_bit = 0; current_bit < 8; current_bit++) {
+      // uint8_t current_bit_mask = _BV(bit_idx);
+      if (port_mask & current_bit_mask) { 
+        // if this pin is actually a key
+        uint8_t debounce_count = current_key_ptr->debounce_count;
+        if (current_key_ptr->on) {           // key is currently on
+          if (key_read & current_bit_mask) { // read on
+            // saturating increment
+            if (debounce_count < DEBOUNCE_MAX) {
+              debounce_count++;
+              // key is already on so no message to send
+            }
+          } else { // read off
+            if (debounce_count > 0) {
+              debounce_count--;
+            }
+            if (debounce_count == 0) {
+              current_key_ptr->on = false;
+              send_note_off(NOTE_ID(key_idx));
+            }
+          }
+
+        } else {                             // key is currently off
+          if (key_read & current_bit_mask) { // read key on
+            if (debounce_count < DEBOUNCE_MAX) {
+              debounce_count++;
+            }
+            if (debounce_count == DEBOUNCE_MAX) {
+              current_key_ptr->on = true;
+              send_note_on(NOTE_ID(key_idx));
+            }
+          } else { // read key off
+            if (debounce_count > 0) {
+              debounce_count--;
+            }
+            // no message to send because key already off
+          }
+        }
+        current_key_ptr->debounce_count = debounce_count;
+        key_idx++;
+        current_key_ptr++;
       }
+      current_bit_mask <<= 1;
     }
   }
 }
 
-inline void clear_channel_select() {
-#if ACTIVE_LOW
-  PORTE |= B00111000;
-#else
-  PORTE &= B11000111;
-#endif
-}
-
-inline void select_channel(uint8_t channel) {
-#if ACTIVE_LOW
+void set_input_channel(int channel) {
   PORTE &= ~_BV(channel + 3);
-#else
-  PORTE |= _BV(channel + 3);
-#endif
 }
 
-inline void restart_adc(uint8_t pin) {
-  ADMUX &= B11111000;
-  ADMUX |= pin;
-
-  ADCSRA |= _BV(ADIF); // clear interrupt flag
-  ADCSRA |= _BV(ADSC); // start next conversion
+void clear_input_channel() {
+  PORTE |= B00111000;
 }
 
 void loop() {
-  // put your main code here, to run repeatedly:
-  for (uint8_t channel = 0; channel < 1; channel++) {
 
-    select_channel(channel);
-
-    if (channel != 2) { // manuals
-      for (int port_idx = 0; port_idx < 10; port_idx++) {
-        read_port(port_idx, channel);
-      }
-    } else { // pedals
-      for (int port_idx = 0; port_idx < 4; port_idx++) {
-        read_port(port_idx, channel);
-      }
+  for (int channel = 0; channel < 3; channel++) {
+    set_input_channel(channel);
+    _delay_us(2);
+    for (int port_idx = 0; port_idx < 10; port_idx++) {
+      read_port(channel, port_idx);
     }
+    update_key_state(channel);
 
     if (ADC_READY) {
       uint8_t new_expr_state = ADCH;
@@ -277,12 +349,10 @@ void loop() {
       // move to next pedal pin
       current_expr = (current_expr + 1) % 3;
 
-      restart_adc(current_expr);
+      start_adc(current_expr);
     }
-
-    // deactivate all channels
-    // clear_channel_select();
-    // _delay_us(2);
-    // should we delay slightly before starting again?
+    clear_input_channel();
   }
+
+  // should we delay slightly before starting again?
 }
