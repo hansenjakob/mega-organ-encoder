@@ -6,7 +6,7 @@
 
 #define OUTPUT_CHANNEL 0
 
-#define DEBOUNCE_MAX 5 
+#define DEBOUNCE_MAX 2 
 
 #define NOTE_ID(x) ((x + 36))
 // #define NOTE_ID(x) (NOTE_ID_ARRAY[x])
