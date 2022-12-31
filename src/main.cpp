@@ -6,7 +6,7 @@
 
 #define OUTPUT_CHANNEL 0
 
-#define DEBOUNCE_MAX 3
+#define DEBOUNCE_MAX 5 
 
 #define NOTE_ID(x) ((x + 36))
 // #define NOTE_ID(x) (NOTE_ID_ARRAY[x])
@@ -229,30 +229,30 @@ void setup() {
   start_adc(current_expr);
 }
 
-void send_note_on(int note_id) {
-  uint8_t command = 0x90 | OUTPUT_CHANNEL;
-  Serial.print("on ");
-  Serial.println(note_id);
-  // Serial.write(command);
-  // Serial.write(note_id);
-  // Serial.write(0x40); // velocity, doesn't matter
+void send_note_on(uint8_t note_id, uint8_t channel) {
+  uint8_t command = 0x90 | channel;
+  // Serial.print("on ");
+  // Serial.println(note_id);
+  Serial.write(command);
+  Serial.write(note_id);
+  Serial.write(0x40); // velocity, doesn't matter
 }
 
-void send_note_off(int note_id) {
-  uint8_t command = 0x80 | OUTPUT_CHANNEL;
-  Serial.print("off ");
-  Serial.println(note_id);
-  // Serial.write(command);
-  // Serial.write(note_id);
-  // Serial.write(0x00); // velocity, may as well be silent?
+void send_note_off(uint8_t note_id, uint8_t channel) {
+  uint8_t command = 0x80 | channel;
+  // Serial.print("off ");
+  // Serial.println(note_id);
+  Serial.write(command);
+  Serial.write(note_id);
+  Serial.write(0x00); // velocity, may as well be silent?
 }
 
 void send_expr(uint8_t value, uint8_t type) {
-  Serial.print("expr ");
-  Serial.println(value);
-  // Serial.write(0xB1); // continuous control command
-  // Serial.write(type);
-  // Serial.write(value);
+  // Serial.print("expr ");
+  // Serial.println(value);
+  Serial.write(0xB1); // continuous control command
+  Serial.write(type);
+  Serial.write(value);
 }
 
 inline void read_port(int channel, int port_idx) {
@@ -264,10 +264,10 @@ inline void read_port(int channel, int port_idx) {
   key_reads[channel][port_idx] = key_in;
 }
 
-inline void update_key_state(int channel) {
+inline void update_key_state(uint8_t channel, uint8_t max_port_idx) {
   uint8_t key_idx = 0;
   struct key_state* current_key_ptr = key_states[channel];
-  for (uint8_t port_idx = 0; port_idx < 10; port_idx++) {
+  for (uint8_t port_idx = 0; port_idx < max_port_idx; port_idx++) {
     uint8_t key_read = key_reads[channel][port_idx];
     uint8_t port_mask = PORT_MASKS[port_idx];
     uint8_t current_bit_mask = 0x01;
@@ -281,32 +281,30 @@ inline void update_key_state(int channel) {
             // saturating increment
             if (debounce_count < DEBOUNCE_MAX) {
               debounce_count++;
-              // key is already on so no message to send
             }
+            // key is already on so no message to send
           } else { // read off
-            if (debounce_count > 0) {
-              debounce_count--;
-            }
+            // if current state is on, debounce_count must be positive, so no need to check
+            debounce_count--;
             if (debounce_count == 0) {
               current_key_ptr->on = false;
-              send_note_off(NOTE_ID(key_idx));
+              send_note_off(NOTE_ID(key_idx), channel);
             }
           }
 
         } else {                             // key is currently off
           if (key_read & current_bit_mask) { // read key on
-            if (debounce_count < DEBOUNCE_MAX) {
-              debounce_count++;
-            }
+            // if current state is off, debounce_count < DEBOUNCE_MAX, so no need to check
+            debounce_count++;
             if (debounce_count == DEBOUNCE_MAX) {
               current_key_ptr->on = true;
-              send_note_on(NOTE_ID(key_idx));
+              send_note_on(NOTE_ID(key_idx), channel);
             }
           } else { // read key off
             if (debounce_count > 0) {
               debounce_count--;
             }
-            // no message to send because key already off
+            // no message to send because key is already off
           }
         }
         current_key_ptr->debounce_count = debounce_count;
@@ -328,13 +326,14 @@ void clear_input_channel() {
 
 void loop() {
 
-  for (int channel = 0; channel < 3; channel++) {
+  for (uint8_t channel = 0; channel < 3; channel++) {
     set_input_channel(channel);
     _delay_us(2);
-    for (int port_idx = 0; port_idx < 10; port_idx++) {
+    uint8_t max_port_idx = (channel == 2) ? 5 : 10;
+    for (uint8_t port_idx = 0; port_idx < max_port_idx; port_idx++) {
       read_port(channel, port_idx);
     }
-    update_key_state(channel);
+    update_key_state(channel, max_port_idx);
 
     if (ADC_READY) {
       uint8_t new_expr_state = ADCH;
@@ -347,7 +346,8 @@ void loop() {
       }
 
       // move to next pedal pin
-      current_expr = (current_expr + 1) % 3;
+      current_expr++;
+      if (current_expr > 2) current_expr = 0;
 
       start_adc(current_expr);
     }
