@@ -337,6 +337,7 @@ void loop() {
 
     if (ADC_READY) {
       uint8_t new_expr_state = ADCH;
+      new_expr_state >>= 1; // the range is 0-127
       // small random excursions are common, so ignore changes of small
       // magnitude
       if ((new_expr_state > expr_state[current_expr] + 1) ||
