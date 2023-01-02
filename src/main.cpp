@@ -8,7 +8,7 @@
 
 #define DEBOUNCE_MAX 4 
 
-#define NOTE_ID(x) ((x + 36))
+#define NOTE_ID(x) ((x) + 36)
 // #define NOTE_ID(x) (NOTE_ID_ARRAY[x])
 
 /* IO map
