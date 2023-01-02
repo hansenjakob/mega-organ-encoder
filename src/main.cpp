@@ -6,7 +6,7 @@
 
 #define OUTPUT_CHANNEL 0
 
-#define DEBOUNCE_MAX 2 
+#define DEBOUNCE_MAX 4 
 
 #define NOTE_ID(x) ((x + 36))
 // #define NOTE_ID(x) (NOTE_ID_ARRAY[x])
@@ -143,6 +143,11 @@ uint8_t expr_state[3] = {}; // all zeros
 // connected to one at a time
 uint8_t current_expr = 0;
 
+uint8_t expr_bounds[2][2] = {
+  110, 240, // pedal 1
+  100, 240, // pedal 2
+};
+
 /*
 
 There are a few options for debouncing that will also address the possibility of
@@ -177,8 +182,8 @@ void setup() {
   PORTB |= 0xFF;
   PORTC |= 0xFF;
   PORTD |= 0xFF;
-  // PORTF |= B11111000; // no pullups on ADC inputs
-  PORTF |= 0xFF; // pullups on for testing
+  PORTF |= B11111000; // no pullups on ADC inputs
+  // PORTF |= 0xFF; // pullups on for testing
   PORTG |= 0xFF;
   PORTH |= 0xFF;
   PORTJ |= 0xFF;
@@ -337,7 +342,17 @@ void loop() {
 
     if (ADC_READY) {
       uint8_t new_expr_state = ADCH;
-      new_expr_state >>= 1; // the range is 0-127
+      // the range is 0-127
+      // approximate max/min obtained by measuring pedals in place
+      if (new_expr_state > expr_bounds[current_expr][0]) {
+        new_expr_state = new_expr_state - expr_bounds[current_expr][0];
+      } else {
+        new_expr_state = 0;
+      }
+      if (new_expr_state > 127) {
+        new_expr_state = 127;
+      }
+
       // small random excursions are common, so ignore changes of small
       // magnitude
       if ((new_expr_state > expr_state[current_expr] + 1) ||
@@ -348,7 +363,7 @@ void loop() {
 
       // move to next pedal pin
       current_expr++;
-      if (current_expr > 2) current_expr = 0;
+      if (current_expr > 1) current_expr = 0;
 
       start_adc(current_expr);
     }
