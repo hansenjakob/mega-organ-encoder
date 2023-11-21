@@ -6,9 +6,22 @@
 
 #define OUTPUT_CHANNEL 0
 
-#define DEBOUNCE_MAX 4 
+#define DEBOUNCE_MAX 4
 
 #define NOTE_ID(x) ((x) + 36)
+
+#define DEBOUNCE_INCREMENT(x)                                                  \
+  if ((x) < DEBOUNCE_MAX) {                                                    \
+    x++;                                                                       \
+  }
+
+#define DEBOUNCE_DECREMENT(x)                                                  \
+  if (x > 0) {                                                                 \
+    x--;                                                                       \
+  }
+
+#define EXPR_FILTER_WINDOW 10
+
 // #define NOTE_ID(x) (NOTE_ID_ARRAY[x])
 
 /* IO map
@@ -124,49 +137,38 @@ const uint8_t EXPR_CONTROLLERS[3] = {1, 2, 11};
 // initialized to all zeros, representing no presses
 uint8_t key_reads[3][10] = {};
 
-// there are a limited number of pointer registers, so to avoid using an extra
-// one, we'll interleave these two states, since we look at them at the same
-// time
+// debounce_count increments every time the key is read as on until it reaches
+// DEBOUNCE_MAX. at that point the key's output is turned on. every time the key
+// is read as off, debounce_count decrements until it reaches zero, at which
+// point the key's output is turned off.
 struct key_state {
   uint8_t debounce_count;
   bool on;
 };
-// uint8_t debounce_counts[61] = {};
-// bool key_states[61] = {};
 
 struct key_state key_states[3][61] = {};
 
-// last read position of each expression pedal
-uint8_t expr_state[3] = {}; // all zeros
+// for each expression pedal, we save the last EXPR_FILTER_WINDOW read values in
+// a ring buffer, and average them to compute the output value, in order to
+// smooth out small fluctuations. the current parameters will probably give
+// around a 1ms delay before a genuine change in the pedal state filters
+// through, which should be completely fine.
+struct expr_pedal_state {
+  uint8_t value;
+  uint8_t last_reads[EXPR_FILTER_WINDOW];
+  uint8_t read_idx;
+};
+
+struct expr_pedal_state expr_states[3] = {};
 
 // which expression pedal is currently being read, since ADC can only be
 // connected to one at a time
 uint8_t current_expr = 0;
 
 uint8_t expr_bounds[2][2] = {
-  110, 240, // pedal 1
-  100, 240, // pedal 2
+    110, 240, // pedal 1
+    100, 240, // pedal 2
 };
-
-/*
-
-There are a few options for debouncing that will also address the possibility of
-transients induced by other keys.
-
-- keep the current key state and a count of the number of sequential reads
-different from the key state; when the count hits a threshold, switch the key
-state
-
-- keep a running sum of +1 for each on and -1 for each off, saturating at 0 and
-some threshold T. when the sum hits T turn on; when it hits 0 turn off.
-
-- save the last T reads for each key and output on/off based on how many of
-these were on or off.
-
-I think I like option 2 the best, as it can have faster response than 1. Option
-3 is probably hard to calibrate and also more resource-hungry.
-
-*/
 
 inline void start_adc(uint8_t pin) {
   ADMUX &= B11111000; // clear currently selected pin
@@ -275,58 +277,67 @@ inline void update_key_state(uint8_t channel, uint8_t max_port_idx) {
   for (uint8_t port_idx = 0; port_idx < max_port_idx; port_idx++) {
     uint8_t key_read = key_reads[channel][port_idx];
     uint8_t port_mask = PORT_MASKS[port_idx];
-    uint8_t current_bit_mask = 0x01;
-    for (uint8_t current_bit = 0; current_bit < 8; current_bit++) {
-      // uint8_t current_bit_mask = _BV(bit_idx);
-      if (port_mask & current_bit_mask) { 
-        // if this pin is actually a key
-        uint8_t debounce_count = current_key_ptr->debounce_count;
-        if (current_key_ptr->on) {           // key is currently on
-          if (key_read & current_bit_mask) { // read on
-            // saturating increment
-            if (debounce_count < DEBOUNCE_MAX) {
-              debounce_count++;
-            }
-            // key is already on so no message to send
-          } else { // read off
-            // if current state is on, debounce_count must be positive, so no need to check
-            debounce_count--;
-            if (debounce_count == 0) {
-              current_key_ptr->on = false;
-              send_note_off(NOTE_ID(key_idx), channel);
-            }
-          }
+    for (uint8_t bit_mask = 0; bit_mask < 0x80; bit_mask <<= 1) {
+      // if this pin is not attached to a key, move along
+      if (!(port_mask & bit_mask))
+        continue;
 
-        } else {                             // key is currently off
-          if (key_read & current_bit_mask) { // read key on
-            // if current state is off, debounce_count < DEBOUNCE_MAX, so no need to check
-            debounce_count++;
-            if (debounce_count == DEBOUNCE_MAX) {
-              current_key_ptr->on = true;
-              send_note_on(NOTE_ID(key_idx), channel);
-            }
-          } else { // read key off
-            if (debounce_count > 0) {
-              debounce_count--;
-            }
-            // no message to send because key is already off
+      uint8_t debounce_count = current_key_ptr->debounce_count;
+      if (current_key_ptr->on) {   // key is currently on
+        if (key_read & bit_mask) { // read on
+          // saturating increment
+          DEBOUNCE_INCREMENT(debounce_count)
+          // key is already on so no message to send
+        } else { // read off
+          // saturating decrement
+          DEBOUNCE_DECREMENT(debounce_count)
+          if (debounce_count == 0) {
+            current_key_ptr->on = false;
+            send_note_off(NOTE_ID(key_idx), channel);
           }
         }
-        current_key_ptr->debounce_count = debounce_count;
-        key_idx++;
-        current_key_ptr++;
+      } else {                     // key is currently off
+        if (key_read & bit_mask) { // read key on
+          // saturating decrement
+          DEBOUNCE_INCREMENT(debounce_count)
+          if (debounce_count == DEBOUNCE_MAX) {
+            current_key_ptr->on = true;
+            send_note_on(NOTE_ID(key_idx), channel);
+          }
+        } else { // read key off
+          DEBOUNCE_DECREMENT(debounce_count)
+          // no message to send because key is already off
+        }
       }
-      current_bit_mask <<= 1;
+
+      current_key_ptr->debounce_count = debounce_count;
+      key_idx++;
+      current_key_ptr++;
     }
   }
 }
 
-void set_input_channel(int channel) {
-  PORTE &= ~_BV(channel + 3);
+void set_input_channel(int channel) { PORTE &= ~_BV(channel + 3); }
+
+void clear_input_channel() { PORTE |= B00111000; }
+
+uint8_t array_mean(uint8_t arr[], uint8_t n) {
+  uint16_t acc = 0;
+  for (uint8_t i = 0; i < n; i++) {
+    acc += arr[i];
+  }
+  return (uint8_t)acc / n;
 }
 
-void clear_input_channel() {
-  PORTE |= B00111000;
+void update_expr_state(struct expr_pedal_state* state, uint8_t read_state) {
+  uint8_t read_idx = state->read_idx;
+  state->last_reads[read_idx] = read_state;
+  state->value = array_mean(state->last_reads, EXPR_FILTER_WINDOW);
+  read_idx++;
+  if (read_idx > EXPR_FILTER_WINDOW) {
+    read_idx = 0;
+  }
+  state->read_idx = read_idx;
 }
 
 void loop() {
@@ -342,28 +353,15 @@ void loop() {
 
     if (ADC_READY) {
       uint8_t new_expr_state = ADCH;
-      // the range is 0-127
-      // approximate max/min obtained by measuring pedals in place
-      if (new_expr_state > expr_bounds[current_expr][0]) {
-        new_expr_state = new_expr_state - expr_bounds[current_expr][0];
-      } else {
-        new_expr_state = 0;
-      }
-      if (new_expr_state > 127) {
-        new_expr_state = 127;
-      }
+      update_expr_state(&expr_states[current_expr], new_expr_state);
 
-      // small random excursions are common, so ignore changes of small
-      // magnitude
-      if ((new_expr_state > expr_state[current_expr] + 1) ||
-          (new_expr_state < expr_state[current_expr] - 1)) {
-        send_expr(new_expr_state, EXPR_CONTROLLERS[current_expr]);
-        expr_state[current_expr] = new_expr_state;
-      }
+      send_expr(expr_states[current_expr].value,
+                EXPR_CONTROLLERS[current_expr]);
 
-      // move to next pedal pin
+      // move to next expression pedal
       current_expr++;
-      if (current_expr > 1) current_expr = 0;
+      if (current_expr > 1)
+        current_expr = 0;
 
       start_adc(current_expr);
     }
